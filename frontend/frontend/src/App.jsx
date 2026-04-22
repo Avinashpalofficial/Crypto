@@ -49,7 +49,6 @@ const PALETTE = [
   "#c2a633",
   "#0033ad",
 ];
-
 const CHART_TABS = [
   "Bar",
   "Bubble",
@@ -66,20 +65,150 @@ const fmt = (n) => {
   if (Math.abs(n) >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
   return "$" + n.toLocaleString();
 };
-
 const pct = (n) => {
   if (n == null) return "—";
   return (n > 0 ? "▲" : "▼") + Math.abs(n).toFixed(2) + "%";
 };
 
+const FILTERS = [
+  { key: "current_price", label: "Price (USD)", prefix: "$", suffix: "" },
+  {
+    key: "market_cap",
+    label: "Market Cap",
+    prefix: "$",
+    suffix: "B",
+    divisor: 1e9,
+  },
+  {
+    key: "total_volume",
+    label: "24h Volume",
+    prefix: "$",
+    suffix: "B",
+    divisor: 1e9,
+  },
+  {
+    key: "price_change_percentage_24h",
+    label: "24h Change %",
+    prefix: "",
+    suffix: "%",
+  },
+];
+
+function RangeSlider({ label, min, max, value, onChange, prefix, suffix }) {
+  const [localMin, setLocalMin] = useState(value[0]);
+  const [localMax, setLocalMax] = useState(value[1]);
+  useEffect(() => {
+    setLocalMin(value[0]);
+    setLocalMax(value[1]);
+  }, [value]);
+
+  const handleMinChange = (e) => {
+    const v = parseFloat(e.target.value);
+    const newMin = Math.min(v, localMax - 0.01);
+    setLocalMin(newMin);
+    onChange([newMin, localMax]);
+  };
+  const handleMaxChange = (e) => {
+    const v = parseFloat(e.target.value);
+    const newMax = Math.max(v, localMin + 0.01);
+    setLocalMax(newMax);
+    onChange([localMin, newMax]);
+  };
+
+  const rangePercMin = ((localMin - min) / (max - min)) * 100;
+  const rangePercMax = ((localMax - min) / (max - min)) * 100;
+  const isActive = localMin > min || localMax < max;
+
+  return (
+    <div className={`filter-card ${isActive ? "active" : ""}`}>
+      <div className="filter-header">
+        <span className="filter-label">{label}</span>
+        {isActive && (
+          <button
+            className="reset-btn"
+            onClick={() => {
+              setLocalMin(min);
+              setLocalMax(max);
+              onChange([min, max]);
+            }}
+          >
+            ✕ Reset
+          </button>
+        )}
+      </div>
+      <div className="range-values">
+        <span className="range-val">
+          {prefix}
+          {typeof localMin === "number"
+            ? localMin.toFixed(localMin < 10 ? 2 : 0)
+            : localMin}
+          {suffix}
+        </span>
+        <span className="range-sep">→</span>
+        <span className="range-val">
+          {prefix}
+          {typeof localMax === "number"
+            ? localMax.toFixed(localMax < 10 ? 2 : 0)
+            : localMax}
+          {suffix}
+        </span>
+      </div>
+      <div className="slider-wrap">
+        <div className="slider-track">
+          <div
+            className="slider-fill"
+            style={{
+              left: `${rangePercMin}%`,
+              width: `${rangePercMax - rangePercMin}%`,
+            }}
+          />
+        </div>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={(max - min) / 200}
+          value={localMin}
+          onChange={handleMinChange}
+          className="range-input"
+        />
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={(max - min) / 200}
+          value={localMax}
+          onChange={handleMaxChange}
+          className="range-input"
+        />
+      </div>
+      <div className="range-extremes">
+        <span>
+          {prefix}
+          {min.toFixed(0)}
+          {suffix}
+        </span>
+        <span>
+          {prefix}
+          {max.toFixed(0)}
+          {suffix}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export default function CryptoDashboard() {
   const [coins, setCoins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [activeTab, setActiveTab] = useState("Bar");
   const [lastUpdated, setLastUpdated] = useState(null);
   const [sortKey, setSortKey] = useState("market_cap");
   const [sortDir, setSortDir] = useState("desc");
+  const [filterRanges, setFilterRanges] = useState({});
+  const [filterLimits, setFilterLimits] = useState({});
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState("Bar");
   const intervalRef = useRef(null);
 
   const fetchData = useCallback(async () => {
@@ -90,6 +219,24 @@ export default function CryptoDashboard() {
       setCoins(data);
       setLastUpdated(new Date());
       setError(null);
+      const limits = {},
+        ranges = {};
+      FILTERS.forEach(({ key, divisor }) => {
+        const vals = data
+          .map((c) => {
+            const v = c[key] ?? 0;
+            return divisor ? v / divisor : v;
+          })
+          .filter((v) => isFinite(v));
+        const mn = Math.floor(Math.min(...vals) * 10) / 10;
+        const mx = Math.ceil(Math.max(...vals) * 10) / 10;
+        limits[key] = [mn, mx];
+        ranges[key] = [mn, mx];
+      });
+      setFilterLimits(limits);
+      setFilterRanges((prev) =>
+        Object.keys(prev).length === 0 ? ranges : prev,
+      );
     } catch (e) {
       setError(e.message);
     } finally {
@@ -103,7 +250,31 @@ export default function CryptoDashboard() {
     return () => clearInterval(intervalRef.current);
   }, [fetchData]);
 
-  const sorted = [...coins].sort((a, b) => {
+  const isFiltered = Object.keys(filterRanges).some((key) => {
+    const lim = filterLimits[key],
+      rng = filterRanges[key];
+    if (!lim || !rng) return false;
+    return rng[0] > lim[0] || rng[1] < lim[1];
+  });
+
+  const activeFilterCount = Object.keys(filterRanges).filter((key) => {
+    const lim = filterLimits[key],
+      rng = filterRanges[key];
+    if (!lim || !rng) return false;
+    return rng[0] > lim[0] || rng[1] < lim[1];
+  }).length;
+
+  const filteredCoins = coins.filter((coin) =>
+    FILTERS.every(({ key, divisor }) => {
+      const rng = filterRanges[key];
+      if (!rng) return true;
+      const v = coin[key] ?? 0;
+      const val = divisor ? v / divisor : v;
+      return val >= rng[0] && val <= rng[1];
+    }),
+  );
+
+  const sorted = [...filteredCoins].sort((a, b) => {
     const av = a[sortKey] ?? 0,
       bv = b[sortKey] ?? 0;
     return sortDir === "desc" ? bv - av : av - bv;
@@ -119,7 +290,6 @@ export default function CryptoDashboard() {
 
   const labels = coins.map((c) => c.symbol?.toUpperCase());
 
-  /* ── chart datasets ── */
   const barData = {
     labels,
     datasets: [
@@ -133,18 +303,13 @@ export default function CryptoDashboard() {
       },
     ],
   };
-
   const bubbleData = {
     datasets: coins.map((c, i) => ({
       label: c.symbol?.toUpperCase(),
       data: [
         {
           x: +(c.price_change_percentage_24h || 0).toFixed(2),
-          y: +(
-            c.price_change_percentage_7d_in_currency ||
-            c.price_change_percentage_7d ||
-            0
-          ).toFixed(2),
+          y: +(c.price_change_percentage_7d_in_currency || 0).toFixed(2),
           r: Math.max(5, Math.min(40, Math.sqrt(c.market_cap / 1e9) * 2)),
         },
       ],
@@ -153,7 +318,6 @@ export default function CryptoDashboard() {
       borderWidth: 2,
     })),
   };
-
   const doughnutData = {
     labels,
     datasets: [
@@ -166,7 +330,6 @@ export default function CryptoDashboard() {
       },
     ],
   };
-
   const lineData = {
     labels,
     datasets: [
@@ -196,7 +359,6 @@ export default function CryptoDashboard() {
       },
     ],
   };
-
   const mixedData = {
     labels,
     datasets: [
@@ -224,7 +386,6 @@ export default function CryptoDashboard() {
       },
     ],
   };
-
   const radarData = {
     labels,
     datasets: [
@@ -250,7 +411,6 @@ export default function CryptoDashboard() {
       },
     ],
   };
-
   const scatterData = {
     datasets: coins.map((c, i) => ({
       label: c.symbol?.toUpperCase(),
@@ -303,7 +463,6 @@ export default function CryptoDashboard() {
       ...extra,
     },
   });
-
   const noScaleOptions = () => ({
     responsive: true,
     maintainAspectRatio: false,
@@ -325,7 +484,6 @@ export default function CryptoDashboard() {
       },
     },
   });
-
   const radarOptions = {
     responsive: true,
     maintainAspectRatio: false,
@@ -360,22 +518,37 @@ export default function CryptoDashboard() {
     },
   };
 
+  const chartDescs = {
+    Bar: "Market capitalization comparison across top 10 cryptocurrencies.",
+    Bubble:
+      "X = 24h change%, Y = 7d change%, bubble size = market cap. Identifies momentum & volume leaders.",
+    Doughnut:
+      "Proportional market cap distribution. Bitcoin's dominance is front and center.",
+    Line: "1h and 24h price change % overlay — spot short-term momentum shifts.",
+    Mixed:
+      "Bar = 24h trading volume (left axis) | Line = current price USD (right axis).",
+    Radar:
+      "Market Cap Score vs Volume Score per coin. Larger polygon = stronger overall presence.",
+    Scatter:
+      "X = 24h volume (B) vs Y = market cap (B). Reveals liquidity vs size relationships.",
+  };
+
   const renderChart = () => {
-    const h = "100%";
     switch (activeTab) {
       case "Bar":
         return (
-          <Bar data={barData} options={darkOptions()} style={{ height: h }} />
+          <Bar
+            data={barData}
+            options={darkOptions()}
+            style={{ height: "100%" }}
+          />
         );
       case "Bubble":
         return (
           <Bubble
             data={bubbleData}
-            options={{
-              ...darkOptions(),
-              plugins: { ...darkOptions().plugins },
-            }}
-            style={{ height: h }}
+            options={darkOptions()}
+            style={{ height: "100%" }}
           />
         );
       case "Doughnut":
@@ -383,12 +556,16 @@ export default function CryptoDashboard() {
           <Doughnut
             data={doughnutData}
             options={noScaleOptions()}
-            style={{ height: h }}
+            style={{ height: "100%" }}
           />
         );
       case "Line":
         return (
-          <Line data={lineData} options={darkOptions()} style={{ height: h }} />
+          <Line
+            data={lineData}
+            options={darkOptions()}
+            style={{ height: "100%" }}
+          />
         );
       case "Mixed":
         return (
@@ -406,7 +583,7 @@ export default function CryptoDashboard() {
                 grid: { drawOnChartArea: false },
               },
             })}
-            style={{ height: h }}
+            style={{ height: "100%" }}
           />
         );
       case "Radar":
@@ -414,7 +591,7 @@ export default function CryptoDashboard() {
           <Radar
             data={radarData}
             options={radarOptions}
-            style={{ height: h }}
+            style={{ height: "100%" }}
           />
         );
       case "Scatter":
@@ -434,7 +611,7 @@ export default function CryptoDashboard() {
                 },
               },
             }}
-            style={{ height: h }}
+            style={{ height: "100%" }}
           />
         );
       default:
@@ -442,38 +619,68 @@ export default function CryptoDashboard() {
     }
   };
 
-  const style = `
+  const totalMcap = coins.reduce((s, c) => s + (c.market_cap || 0), 0);
+  const totalVol = coins.reduce((s, c) => s + (c.total_volume || 0), 0);
+  const btc = coins.find((c) => c.id === "bitcoin");
+
+  const css = `
     @import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;600;800&display=swap');
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #060910; }
-
     .dash { background: #060910; min-height: 100vh; padding: 24px; font-family: 'Space Mono', monospace; color: #e6edf3; }
 
     .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 12px; }
     .logo { display: flex; align-items: center; gap: 12px; }
     .logo-dot { width: 10px; height: 10px; border-radius: 50%; background: #f7931a; box-shadow: 0 0 16px #f7931a; animation: pulse 2s infinite; }
-    @keyframes pulse { 0%,100%{ opacity:1; transform:scale(1); } 50%{ opacity:.5; transform:scale(1.3); } }
+    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(1.3)} }
     .logo-text { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 22px; letter-spacing: -0.5px; background: linear-gradient(90deg,#f7931a,#ffe066); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
     .sub { font-size: 11px; color: #4a5568; margin-top: 2px; }
-
     .meta { display: flex; align-items: center; gap: 16px; }
     .live-badge { display: flex; align-items: center; gap: 6px; background: #0d1117; border: 1px solid #21262d; border-radius: 20px; padding: 6px 14px; font-size: 11px; color: #56d364; }
     .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #56d364; animation: pulse 1.5s infinite; }
     .last-updated { font-size: 10px; color: #4a5568; }
-
-    .refresh-btn { background: linear-gradient(135deg, #1a1f2e, #21262d); border: 1px solid #30363d; color: #a0aec0; padding: 7px 16px; border-radius: 8px; cursor: pointer; font-size: 11px; font-family: 'Space Mono', monospace; transition: all 0.2s; }
+    .refresh-btn { background: linear-gradient(135deg,#1a1f2e,#21262d); border: 1px solid #30363d; color: #a0aec0; padding: 7px 16px; border-radius: 8px; cursor: pointer; font-size: 11px; font-family: 'Space Mono',monospace; transition: all 0.2s; }
     .refresh-btn:hover { border-color: #f7931a; color: #f7931a; }
 
-    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 28px; }
+    .stats-row { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 14px; margin-bottom: 28px; }
     .stat-card { background: #0d1117; border: 1px solid #21262d; border-radius: 12px; padding: 16px; transition: border-color 0.2s; }
     .stat-card:hover { border-color: #f7931a44; }
     .stat-label { font-size: 10px; color: #4a5568; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-    .stat-val { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 18px; color: #e6edf3; }
+    .stat-val { font-family: 'Syne',sans-serif; font-weight: 700; font-size: 18px; color: #e6edf3; }
     .stat-sub { font-size: 10px; color: #4a5568; margin-top: 2px; }
 
-    .section-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 14px; color: #a0aec0; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 14px; }
+    .filter-bar { background: #0d1117; border: 1px solid #21262d; border-radius: 14px; margin-bottom: 20px; overflow: hidden; }
+    .filter-toggle { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; cursor: pointer; user-select: none; }
+    .filter-toggle:hover { background: #ffffff04; }
+    .filter-title { display: flex; align-items: center; gap: 10px; font-family: 'Syne',sans-serif; font-weight: 700; font-size: 13px; color: #a0aec0; text-transform: uppercase; letter-spacing: 1.5px; }
+    .filter-badge { background: #f7931a; color: #000; font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 10px; font-family: 'Space Mono',monospace; }
+    .filter-toggle-right { display: flex; align-items: center; gap: 12px; }
+    .reset-all-btn { background: none; border: 1px solid #30363d; color: #a0aec0; padding: 5px 12px; border-radius: 6px; font-size: 10px; cursor: pointer; font-family: 'Space Mono',monospace; transition: all 0.2s; }
+    .reset-all-btn:hover { border-color: #f7931a; color: #f7931a; }
+    .chevron { font-size: 12px; color: #4a5568; transition: transform 0.3s; }
+    .chevron.open { transform: rotate(180deg); }
+    .filters-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 16px; padding: 0 20px 20px; }
 
-    /* TABLE */
+    .filter-card { background: #060910; border: 1px solid #21262d; border-radius: 10px; padding: 14px; transition: border-color 0.2s; }
+    .filter-card.active { border-color: #f7931a55; background: #f7931a05; }
+    .filter-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    .filter-label { font-size: 10px; color: #4a5568; text-transform: uppercase; letter-spacing: 1px; }
+    .reset-btn { background: none; border: none; color: #f7931a; font-size: 9px; cursor: pointer; font-family: 'Space Mono',monospace; }
+    .range-values { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .range-val { font-family: 'Syne',sans-serif; font-weight: 700; font-size: 13px; color: #e6edf3; }
+    .range-sep { color: #4a5568; font-size: 11px; }
+    .slider-wrap { position: relative; height: 24px; margin-bottom: 4px; }
+    .slider-track { position: absolute; top: 50%; transform: translateY(-50%); left: 0; right: 0; height: 3px; background: #21262d; border-radius: 2px; }
+    .slider-fill { position: absolute; height: 100%; background: linear-gradient(90deg,#f7931a,#ffe066); border-radius: 2px; }
+    .range-input { position: absolute; width: 100%; height: 100%; top: 0; left: 0; opacity: 0; cursor: pointer; margin: 0; -webkit-appearance: none; appearance: none; background: transparent; pointer-events: all; }
+    .range-input::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #f7931a; border: 2px solid #060910; cursor: pointer; box-shadow: 0 0 6px #f7931a88; }
+    .range-extremes { display: flex; justify-content: space-between; font-size: 9px; color: #4a5568; }
+
+    .section-title { font-family: 'Syne',sans-serif; font-weight: 700; font-size: 14px; color: #a0aec0; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 14px; }
+    .results-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+    .results-count { font-size: 11px; color: #4a5568; }
+    .results-count span { color: #f7931a; font-weight: 700; }
+
     .table-wrap { overflow-x: auto; border: 1px solid #21262d; border-radius: 14px; margin-bottom: 32px; }
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     thead th { background: #0d1117; color: #4a5568; text-transform: uppercase; letter-spacing: 1px; padding: 12px 14px; text-align: right; cursor: pointer; white-space: nowrap; user-select: none; border-bottom: 1px solid #21262d; font-size: 10px; }
@@ -492,11 +699,11 @@ export default function CryptoDashboard() {
     .pos-pct { color: #56d364; }
     .neg-pct { color: #f87171; }
     .price-cell { color: #e6edf3; font-weight: 700; }
+    .no-results { text-align: center; padding: 40px; color: #4a5568; font-size: 12px; }
 
-    /* CHARTS */
     .charts-panel { background: #0d1117; border: 1px solid #21262d; border-radius: 14px; overflow: hidden; }
     .tabs { display: flex; border-bottom: 1px solid #21262d; overflow-x: auto; }
-    .tab-btn { background: none; border: none; color: #4a5568; font-family: 'Space Mono', monospace; font-size: 11px; padding: 14px 20px; cursor: pointer; white-space: nowrap; letter-spacing: 0.5px; transition: all 0.2s; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+    .tab-btn { background: none; border: none; color: #4a5568; font-family: 'Space Mono',monospace; font-size: 11px; padding: 14px 20px; cursor: pointer; white-space: nowrap; letter-spacing: 0.5px; transition: all 0.2s; border-bottom: 2px solid transparent; margin-bottom: -1px; }
     .tab-btn:hover { color: #a0aec0; background: #ffffff05; }
     .tab-btn.active { color: #f7931a; border-bottom-color: #f7931a; background: #f7931a08; }
     .chart-area { padding: 24px; height: 400px; position: relative; }
@@ -508,28 +715,9 @@ export default function CryptoDashboard() {
     .error-msg { color: #f87171; text-align: center; padding: 40px; font-size: 12px; }
   `;
 
-  const chartDescs = {
-    Bar: "Market capitalization comparison across top 10 cryptocurrencies.",
-    Bubble:
-      "X = 24h change%, Y = 7d change%, bubble size = market cap. Identifies momentum & volume leaders.",
-    Doughnut:
-      "Proportional market cap distribution. Bitcoin's dominance is front and center.",
-    Line: "1h and 24h price change % overlay — spot short-term momentum shifts.",
-    Mixed:
-      "Bar = 24h trading volume (left axis) | Line = current price USD (right axis).",
-    Radar:
-      "Market Cap Score vs Volume Score per coin. Larger polygon = stronger overall presence.",
-    Scatter:
-      "X = 24h volume (B) vs Y = market cap (B). Reveals liquidity vs size relationships.",
-  };
-
-  const totalMcap = coins.reduce((s, c) => s + (c.market_cap || 0), 0);
-  const totalVol = coins.reduce((s, c) => s + (c.total_volume || 0), 0);
-  const btc = coins.find((c) => c.id === "bitcoin");
-
   return (
     <>
-      <style>{style}</style>
+      <style>{css}</style>
       <div className="dash">
         {/* Header */}
         <div className="header">
@@ -606,8 +794,68 @@ export default function CryptoDashboard() {
           </div>
         )}
 
+        {/* Filter Panel */}
+        <div className="filter-bar">
+          <div
+            className="filter-toggle"
+            onClick={() => setFiltersOpen((o) => !o)}
+          >
+            <div className="filter-title">
+              🎛 Range Filters
+              {activeFilterCount > 0 && (
+                <span className="filter-badge">{activeFilterCount} active</span>
+              )}
+            </div>
+            <div className="filter-toggle-right">
+              {isFiltered && (
+                <button
+                  className="reset-all-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setFilterRanges({ ...filterLimits });
+                  }}
+                >
+                  Reset All
+                </button>
+              )}
+              <span className={`chevron ${filtersOpen ? "open" : ""}`}>▼</span>
+            </div>
+          </div>
+          {filtersOpen && Object.keys(filterLimits).length > 0 && (
+            <div className="filters-grid">
+              {FILTERS.map(({ key, label, prefix, suffix }) => {
+                const lim = filterLimits[key],
+                  rng = filterRanges[key];
+                if (!lim || !rng) return null;
+                return (
+                  <RangeSlider
+                    key={key}
+                    label={label}
+                    min={lim[0]}
+                    max={lim[1]}
+                    value={rng}
+                    prefix={prefix}
+                    suffix={suffix}
+                    onChange={(val) =>
+                      setFilterRanges((prev) => ({ ...prev, [key]: val }))
+                    }
+                  />
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         {/* Table */}
-        <div className="section-title">Market Overview</div>
+        {!loading && !error && (
+          <div className="results-bar">
+            <div className="section-title">Market Overview</div>
+            <div className="results-count">
+              Showing <span>{sorted.length}</span> of{" "}
+              <span>{coins.length}</span> coins{isFiltered && " (filtered)"}
+            </div>
+          </div>
+        )}
         <div className="table-wrap">
           {loading ? (
             <div className="loading">
@@ -619,6 +867,14 @@ export default function CryptoDashboard() {
               <br />
               <span style={{ color: "#4a5568", fontSize: 11 }}>
                 CoinGecko rate limit may apply. Try refreshing in 60s.
+              </span>
+            </div>
+          ) : sorted.length === 0 ? (
+            <div className="no-results">
+              😶 No coins match your filter range.
+              <br />
+              <span style={{ fontSize: 10, color: "#30363d" }}>
+                Try widening your range or click Reset All
               </span>
             </div>
           ) : (
